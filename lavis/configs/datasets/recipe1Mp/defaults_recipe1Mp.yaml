@@ -1,0 +1,19 @@
+datasets:
+  recipe1Mp: # name of the dataset builder
+    # dataset_card: dataset_card/avsd_dialogue.md # path to the dataset card
+    data_type: images # [images|videos|features] we use features in this case for extracted video features
+
+    build_info:
+      # Be careful not to append minus sign (-) before split to avoid itemizing
+      annotations:
+        train:
+          url: /nfs_share2/code/donghee/inversecooking/data/recipe1m_train_1M+.pkl
+          storage: /nfs_share2/code/donghee/inversecooking/data/recipe1m_train_1M+.pkl
+        val:
+          url: /nfs_share2/code/donghee/inversecooking/data/recipe1m_val_1M+.pkl
+          storage: /nfs_share2/code/donghee/inversecooking/data/recipe1m_val_1M+.pkl
+        test:
+          url: /nfs_share2/code/donghee/inversecooking/data/recipe1m_test_1M+.pkl
+          storage: /nfs_share2/code/donghee/inversecooking/data/recipe1m_test_1M+.pkl
+      images:
+        storage: /home/donghee/im2recipe-Pytorch/1M

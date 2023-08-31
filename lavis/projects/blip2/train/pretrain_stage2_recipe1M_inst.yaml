@@ -1,0 +1,94 @@
+ # Copyright (c) 2022, salesforce.com, inc.
+ # All rights reserved.
+ # SPDX-License-Identifier: BSD-3-Clause
+ # For full license text, see the LICENSE file in the repo root or https://opensource.org/licenses/BSD-3-Clause
+
+model:
+  arch: blip2_opt ## blip2_opt
+  model_type: pretrain_opt2.7b ## pretrain_opt2.7b ## vicuna13b?
+  load_pretrained: True
+  load_finetuned: True ##
+  # intialize stage 2 pretraining from stage 1 pretrained model
+  pretrained: "/nfs_share2/code/donghee/LAVIS/lavis/output/BLIP2/Pretrain_stage1/20230521214/checkpoint_8.pth" ## 
+  finetuned: "/nfs_share2/code/donghee/LAVIS/lavis/output/BLIP2/Pretrain_stage2/20230524000/checkpoint_9.pth" ## inst only
+  ## /nfs_share2/code/donghee/LAVIS/lavis/output/BLIP2/Pretrain_stage1/20230521214/checkpoint_8.pth - inst only
+  ## /nfs_share2/code/donghee/LAVIS/lavis/output/BLIP2/Pretrain_stage1/20230522044/checkpoint_7.pth - inst ingr
+  ## /nfs_share2/code/donghee/LAVIS/lavis/output/BLIP2/Pretrain_stage1/20230524083/checkpoint_13.pth - ingr only
+  freeze_vit: True
+  max_txt_len: 150 ## ingr - 30 / inst - 150
+  ingr_loss : False
+  recipe: True
+
+
+datasets:
+  recipe1M_inst:  ## recipe1M/ recipe1Mp / recipe1M_inst / recipe1M_inst_vicuna
+      vis_processor:
+        train:
+          name: "blip2_image_train"
+          image_size: 224
+        eval:
+          name: "blip_image_eval"
+          image_size: 224
+
+      text_processor:
+        train:
+          name: "blip_caption"
+          # prompt: "This is a food made with " ## TODO
+          prompt: "This is a step-by-step recipe instruction:"
+        eval:
+          name: "blip_caption"
+          # prompt: "This is a food made with " ## TODO
+          prompt: "This is a step-by-step recipe instruction:"
+  # coco_caption:
+  #   vis_processor:
+  #       train:
+  #         name: "blip2_image_train"
+  #         image_size: 224
+  #   text_processor:
+  #       train:
+  #         name: "blip_caption"
+  #   # build_info:
+  #   #     images:
+  #   #         storage: '/export/share/datasets/vision/coco/images/'          
+  # vg_caption: # name of the dataset builder
+  #   vis_processor:
+  #       train:
+  #         name: "blip_image_train"
+  #         image_size: 224
+  #   text_processor:
+  #       train:
+  #         name: "blip_caption"
+  #   # build_info:
+  #   #     images:
+  #   #         storage: '//export/share/datasets/vision/visual-genome/image/'
+
+run:
+  task: image_text_pretrain ## ingredient_prediction
+  # optimizer
+  lr_sched: "linear_warmup_cosine_lr"
+  init_lr: 1e-4
+  min_lr: 1e-5
+  warmup_lr: 1e-6
+
+  weight_decay: 0.05
+  max_epoch: 20 ##
+  batch_size_train: 16 ## 64
+  batch_size_eval: 16 ## 64
+  num_workers: 4
+  warmup_steps: 2000
+
+  seed: 42
+  output_dir: "output/BLIP2/Pretrain_stage2"
+
+  amp: True
+  resume_ckpt_path: null ##
+
+  evaluate: False ##
+  train_splits: ["train"]
+  valid_splits: ["val"] ## evaluation 잘 되면 이거 살리기
+  # test_splits: ["test"]
+
+  device: "cuda"
+  world_size: 4 ##
+  dist_url: "env://"
+  distributed: True
