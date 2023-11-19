@@ -16,7 +16,7 @@ import transformers
 from lavis.common.registry import registry
 from lavis.models.blip2_models.blip2 import Blip2Base, disabled_train
 
-from lavis.datasets.data_utils import compute_metrics
+from lavis.datasets.data_utils import compute_metrics, compute_raw_metrics
 
 class IngredientClassifier(nn.Module):
     def __init__(self, input_dim, num_labels, hidden_dim = 1024):
@@ -143,7 +143,7 @@ class Blip2VicunaInstruct(Blip2Base):
 
         ##
         
-        self.num_ingr = 1486
+        self.num_ingr = 1488 ### 1486 
 
         if ingr_layer:
             self.ingr_classifier = IngredientClassifier(input_dim = self.llm_model.config.hidden_size, num_labels=self.num_ingr, hidden_dim=1024)
@@ -272,36 +272,244 @@ class Blip2VicunaInstruct(Blip2Base):
         inputs_embeds = torch.cat([inputs_llm, inputs_embeds], dim=1)
         attention_mask = torch.cat([atts_llm, llm_tokens['attention_mask']], dim=1)
 
+        ## tracking eos pos
+        eos_pos = (llm_tokens['input_ids'] == self.llm_tokenizer.eos_token_id)
+        eos_pos[:, 0] = False ## ignore SOS token (SOS token = EOS token)
+        eos_pos = (eos_pos).nonzero(as_tuple=True)[1]
+
 
         if self.ingr_layer:
             with self.maybe_autocast():
-                hidden_states = self.llm_model(
+                outputs = self.llm_model(
                     inputs_embeds=inputs_embeds,
                     attention_mask=attention_mask,
                     return_dict=True,
                     labels=targets,
-                    only_hidden = True,
+                    output_hidden_states = True,
                 )
+
+                # hidden_states = self.llm_model(
+                #     inputs_embeds=inputs_embeds, ## TODO input_ids로 해야할듯.. ## 하 근데 image token 때문에 안되네..
+                #     attention_mask=attention_mask,
+                #     return_dict=True,
+                #     labels=targets,
+                #     only_hidden = True,
+                # )
+
+            hidden_states = outputs['hidden_states'][-1]
+            llm_loss = outputs.loss
+            # Extract the hidden states of the EOS tokens
+            batch_indices = torch.arange(hidden_states.size(0)).to(hidden_states.device)
+            num_query = inputs_llm.size(1) ## 32
+            eos_hidden = hidden_states[batch_indices, num_query + eos_pos, :] ## (batch, 4096)
             
-            hidden_states = torch.mean(hidden_states,dim=1) ## shape (batch_size, seq_len, hidden_dim) -> (batch_size, hidden_dim)
-            ingr_prediction = self.ingr_classifier(hidden_states)
+            # expanded_attention_mask = attention_mask.unsqueeze(-1).expand(hidden_states.size())
+            # masked_hidden_states = hidden_states * expanded_attention_mask
+            # sum_hidden_states = torch.sum(masked_hidden_states, dim=1)
+            # sum_attention_mask = attention_mask.sum(dim=1, keepdim=True)
+            # mean_hidden_states = sum_hidden_states / sum_attention_mask
+            
+            # hidden_states = torch.mean(hidden_states,dim=1) ## shape (batch_size, seq_len, hidden_dim) -> (batch_size, hidden_dim)
+            ingr_prediction = self.ingr_classifier(eos_hidden)
 
             ingr_gt = samples['ingredient_int']
-            ingr_gt_tensor = torch.zeros((hidden_states.shape[0], self.num_ingr+2)) ## (batch_size, 1488)
+            ingr_gt_tensor = torch.zeros((hidden_states.size(0), self.num_ingr)) ## (batch_size, 1488)
 
             for i, labels in enumerate(ingr_gt):
                 ingr_gt_tensor[i, labels] = 1
+                ingr_gt_tensor[i, [0, self.num_ingr-1]] = 0
             
-            ingr_gt_tensor = ingr_gt_tensor[:, 1:-1].to(ingr_prediction.device) ## 0, 1487 제거
+            ingr_gt_tensor = ingr_gt_tensor.to(ingr_prediction.device) ## 0, 1487 제거 ## 원래 ingr_gt_tensor[:, 1:-1]
             ingr_loss = self.ingr_criterion(ingr_prediction, ingr_gt_tensor)
 
-            f1, iou = compute_metrics(torch.sigmoid(ingr_prediction), ingr_gt_tensor)
+            f1, iou = compute_metrics(torch.sigmoid(ingr_prediction), ingr_gt_tensor) ## list
+            # Compute raw metrics
+            # TPs, FPs, FNs = compute_raw_metrics(torch.sigmoid(ingr_prediction), ingr_gt_tensor)
 
             if self.quantity_layer:
                 ## quantity
                 quantity_prediction = self.quantity_classifier(hidden_states)
 
-                quantity_gt = samples['weight'][:, 1:-1].to(quantity_prediction.device) ## (batch, 1486) ?? 
+                quantity_gt = samples['weight'].to(quantity_prediction.device) ## (batch, 1486) ?? 
+                # quantity_gt_tensor = torch.zeros((hidden_states.shape[0], self.num_ingr+2)) ## (batch_size, 1488)
+                quantity_loss = self.quantity_criterion(quantity_prediction, quantity_gt)
+                
+                loss = self.ingr_loss_constant * ingr_loss + quantity_loss + llm_loss
+            else:
+                quantity_loss = 0
+                loss = ingr_loss + llm_loss
+
+            ##
+            if eval:
+                ingr_text = []
+                pred = (torch.sigmoid(ingr_prediction) > 0.5).float() ##
+                for i in range(pred.size(0)):
+                    one_hot = pred[i]
+                    indices = (one_hot ==1).nonzero().squeeze()
+
+                    ingr_names = []
+
+                    if indices.dim() == 0:
+                        ingr_name = self.idx2ingr[str(indices.item())]
+                        ingr_names.append(ingr_name)
+                    
+                    else:
+                        for idx in indices:
+                            ingr_name = self.idx2ingr[str(idx.item())]
+                            ingr_names.append(ingr_name)
+
+                    ingr_text.append(ingr_names)
+                
+                # return {"loss": loss, "TPs": TPs, "FPs": FPs, 'FNs': FNs, "ingr_loss": ingr_loss, "quantity_loss": quantity_loss, 'prediction': ingr_text}
+                return {"loss": loss, "f1": f1, "iou": iou, "ingr_loss": ingr_loss, "quantity_loss": quantity_loss, 'llm_loss': llm_loss, 'prediction': ingr_text}
+            
+            else:
+                # return {"loss": loss, "TPs": TPs, "FPs": FPs, 'FNs': FNs, "ingr_loss": ingr_loss, "quantity_loss": quantity_loss}
+                return {"loss": loss, "f1": f1, "iou": iou, "ingr_loss": ingr_loss, "quantity_loss": quantity_loss, 'llm_loss': llm_loss}
+        
+        else:
+            with self.maybe_autocast():
+                outputs = self.llm_model(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    return_dict=True,
+                    labels=targets,
+                )
+            loss = outputs.loss
+
+            return {"loss": loss}
+    
+    @torch.no_grad()    
+    def eval_metrics(self, samples, eval = False): ## self.ingr_num 1486으로 되어있음. 다시 해야할 것임
+        # print('-----------------')
+        # print(samples["text_input"])
+        # print(samples["text_output"])
+        # print('-----------------')
+
+        image = samples["image"]
+        with self.maybe_autocast():
+            image_embeds = self.ln_vision(self.visual_encoder(image))
+        image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(image.device) ## (batch_size, 257)
+
+        bs = image.size(0)
+
+        query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1) ## 그냥 복사인듯?
+        if self.qformer_text_input:
+            text_Qformer = self.tokenizer(
+                samples["text_input"],
+                padding='longest',
+                truncation=True,
+                max_length=self.max_txt_len,
+                return_tensors="pt",
+            ).to(image.device)
+            query_atts = torch.ones(query_tokens.size()[:-1], dtype=torch.long).to(image.device) ## (batch_size, 32)
+            Qformer_atts = torch.cat([query_atts, text_Qformer.attention_mask],dim=1) ## (batch_size, 49)
+
+            query_output = self.Qformer.bert(
+                text_Qformer.input_ids,
+                attention_mask=Qformer_atts,
+                query_embeds=query_tokens,
+                encoder_hidden_states=image_embeds,
+                encoder_attention_mask=image_atts,
+                return_dict=True,
+            ) ## (batch_size, 49, 768)
+        else:
+            query_output = self.Qformer.bert(
+                query_embeds=query_tokens,
+                encoder_hidden_states=image_embeds,
+                encoder_attention_mask=image_atts,
+                return_dict=True,
+            ) ## (batch_size, 32, 768)
+
+        inputs_llm = self.llm_proj(query_output.last_hidden_state[:,:query_tokens.size(1),:])
+        atts_llm = torch.ones(inputs_llm.size()[:-1], dtype=torch.long).to(image.device)
+
+        self.llm_tokenizer.padding_side = "right"
+        self.llm_tokenizer.truncation_side = 'left'
+        text_input_tokens = self.llm_tokenizer(
+            samples['text_input'],
+            return_tensors="pt",
+            padding="longest",
+            truncation=True,
+            max_length=self.max_txt_len,
+        ).to(image.device)
+
+        self.llm_tokenizer.truncation_side = 'right'
+        text_output_tokens = self.llm_tokenizer(
+            [t + self.llm_tokenizer.eos_token for t in samples['text_output']],
+            return_tensors="pt",
+            padding="longest",
+            truncation=True,
+            max_length=self.max_output_txt_len,
+        ).to(image.device)
+
+        llm_tokens, input_part_targets_len = self.concat_text_input_output(
+            text_input_tokens.input_ids,
+            text_input_tokens.attention_mask,
+            text_output_tokens.input_ids,
+            text_output_tokens.attention_mask,
+        )
+
+        # do not apply loss to the padding
+        targets = llm_tokens['input_ids'].masked_fill(
+            llm_tokens['input_ids'] == self.llm_tokenizer.pad_token_id, -100
+        )
+
+        # do not apply loss to the text input (i.e., instruction)
+        for i, l in enumerate(input_part_targets_len):
+            targets[i][:l] = -100
+
+        # do not apply loss to the query tokens
+        empty_targets = (
+            torch.ones(atts_llm.size(), dtype=torch.long).to(image.device).fill_(-100)
+        )
+        targets = torch.cat([empty_targets, targets], dim=1)
+
+        inputs_embeds = self.llm_model.get_input_embeddings()(llm_tokens['input_ids'])
+        inputs_embeds = torch.cat([inputs_llm, inputs_embeds], dim=1)
+        attention_mask = torch.cat([atts_llm, llm_tokens['attention_mask']], dim=1)
+
+
+        if self.ingr_layer:
+            with torch.no_grad():
+                with self.maybe_autocast():
+                    hidden_states = self.llm_model( ## return_hidden
+                        inputs_embeds=inputs_embeds,
+                        attention_mask=attention_mask,
+                        return_dict=True,
+                        labels=None, ## None
+                        only_hidden = True,
+                        output_hidden_states=True,
+                    )
+
+                expanded_attention_mask = attention_mask.unsqueeze(-1).expand(hidden_states.size())
+                masked_hidden_states = hidden_states * expanded_attention_mask
+                sum_hidden_states = torch.sum(masked_hidden_states, dim=1)
+                sum_attention_mask = attention_mask.sum(dim=1, keepdim=True)
+                mean_hidden_states = sum_hidden_states / sum_attention_mask
+                
+                # hidden_states = torch.mean(hidden_states,dim=1) ## shape (batch_size, seq_len, hidden_dim) -> (batch_size, hidden_dim)
+                ingr_prediction = self.ingr_classifier(mean_hidden_states)
+
+            ingr_gt = samples['ingredient_int']
+            ingr_gt_tensor = torch.zeros((hidden_states.shape[0], self.num_ingr)) ## (batch_size, 1488)
+
+            for i, labels in enumerate(ingr_gt):
+                ingr_gt_tensor[i, labels] = 1
+                ingr_gt_tensor[i, [0, self.num_ingr-1]] = 0
+            
+            ingr_gt_tensor = ingr_gt_tensor.to(ingr_prediction.device) ## 0, 1487 제거
+            ingr_loss = self.ingr_criterion(ingr_prediction, ingr_gt_tensor)
+
+            f1, iou = compute_metrics(torch.sigmoid(ingr_prediction), ingr_gt_tensor) ## list
+            # Compute raw metrics
+            # TPs, FPs, FNs = compute_raw_metrics(torch.sigmoid(ingr_prediction), ingr_gt_tensor)
+
+            if self.quantity_layer:
+                ## quantity
+                quantity_prediction = self.quantity_classifier(hidden_states)
+
+                quantity_gt = samples['weight'].to(quantity_prediction.device) ## (batch, 1486) ?? 
                 # quantity_gt_tensor = torch.zeros((hidden_states.shape[0], self.num_ingr+2)) ## (batch_size, 1488)
                 quantity_loss = self.quantity_criterion(quantity_prediction, quantity_gt)
                 
@@ -321,33 +529,35 @@ class Blip2VicunaInstruct(Blip2Base):
                     ingr_names = []
 
                     if indices.dim() == 0:
-                        ingr_name = self.idx2ingr[str(idx.item() + 1)]
+                        ingr_name = self.idx2ingr[str(indices.item())]
                         ingr_names.append(ingr_name)
                     
                     else:
                         for idx in indices:
-                            ingr_name = self.idx2ingr[str(idx.item() + 1)]
+                            ingr_name = self.idx2ingr[str(idx.item())]
                             ingr_names.append(ingr_name)
 
                     ingr_text.append(ingr_names)
                 
+                # return {"loss": loss, "TPs": TPs, "FPs": FPs, 'FNs': FNs, "ingr_loss": ingr_loss, "quantity_loss": quantity_loss, 'prediction': ingr_text}
                 return {"loss": loss, "f1": f1, "iou": iou, "ingr_loss": ingr_loss, "quantity_loss": quantity_loss, 'prediction': ingr_text}
             
             else:
+                # return {"loss": loss, "TPs": TPs, "FPs": FPs, 'FNs': FNs, "ingr_loss": ingr_loss, "quantity_loss": quantity_loss}
                 return {"loss": loss, "f1": f1, "iou": iou, "ingr_loss": ingr_loss, "quantity_loss": quantity_loss}
         
         else:
-            with self.maybe_autocast():
-                outputs = self.llm_model(
-                    inputs_embeds=inputs_embeds,
-                    attention_mask=attention_mask,
-                    return_dict=True,
-                    labels=targets,
-                )
-            loss = outputs.loss
+            # with self.maybe_autocast():
+            #     outputs = self.llm_model(
+            #         inputs_embeds=inputs_embeds,
+            #         attention_mask=attention_mask,
+            #         return_dict=True,
+            #         labels=targets,
+            #     )
+            # loss = outputs.loss
 
-            return {"loss": loss}
-        
+            # return {"loss": loss}
+            return None
 
     @torch.no_grad()
     def generate(
@@ -362,6 +572,7 @@ class Blip2VicunaInstruct(Blip2Base):
         length_penalty=1,
         num_captions=1,
         temperature=1,
+        eval = False,
     ):
         self.llm_tokenizer.padding_side = "left"
 
@@ -452,7 +663,7 @@ class Blip2VicunaInstruct(Blip2Base):
                     return_dict=True,
                 )
 
-            inputs_llm = self.llm_proj(query_output.last_hidden_state[:,:query_tokens.size(1),:])
+            inputs_llm = self.llm_proj(query_output.last_hidden_state[:,:query_tokens.size(1),:]) ## query_token.size(1) (seq_length)로 자르는 이유는, exclude any states that might correspond to other parts of the input like instruction toekns or padding
             atts_llm = torch.ones(inputs_llm.size()[:-1], dtype=torch.long).to(image.device)
 
         llm_tokens = self.llm_tokenizer(
@@ -466,27 +677,169 @@ class Blip2VicunaInstruct(Blip2Base):
             inputs_embeds = torch.cat([inputs_llm, inputs_embeds], dim=1)
             attention_mask = torch.cat([atts_llm, llm_tokens.attention_mask], dim=1)
 
-        if self.ingr_layer:
+        if self.ingr_layer: ## 여기 다시 TODO
             with self.maybe_autocast():
-                hidden_states = self.llm_model(
+                outputs = self.llm_model.generate(
                     inputs_embeds=inputs_embeds,
                     attention_mask=attention_mask,
-                    only_hidden=True
-                )
-            
-                hidden_states = torch.mean(hidden_states,dim=1)
-                ingr_prediction = self.ingr_classifier(hidden_states)
-                ingr_prediction = torch.sigmoid(ingr_prediction)
-                ingr_prediction = (ingr_prediction > 0.5).float()
-                ingr_pred_int = [torch.nonzero(row, as_tuple=False).squeeze(-1).tolist() for row in ingr_prediction]
+                    do_sample=use_nucleus_sampling, # false
+                    top_p=top_p,
+                    temperature=temperature,
+                    num_beams=num_beams, ## 1, greedy decoding
+                    max_length=max_length,
+                    min_length=min_length,
+                    # eos_token_id=self.eos_token_id,
+                    repetition_penalty=repetition_penalty,
+                    length_penalty=length_penalty,
+                    num_return_sequences=num_captions,
+                    return_dict_in_generate=True,
+                    output_hidden_states=True,
+                    # output_attentions = True, -> 이거 하면 overload 많이 됨
+                ) ## token id..
 
-                quantity_prediction = []
-                if self.quantity_layer:
-                    quantity_prediction = self.quantity_classifier(hidden_states)
-                    quantity_prediction = [quantity_prediction[i][ingr_pred] for i, ingr_pred in enumerate(ingr_pred_int)]
-                    # assert quantity_prediction.shape == ingr_pred_int.shape
-                
-            return ingr_prediction, ingr_pred_int, quantity_prediction
+            # ---- TODO greedy 말고..? - sequence 어쩌구 그 hugging face 그거 참고
+            generated_sequences = outputs.sequences
+            eos_pos = torch.nonzero((generated_sequences == self.llm_tokenizer.eos_token_id), as_tuple=True)[1]            
+
+            if len(eos_pos) != bs: # if no EOS
+                eos_list = []
+                for sequence in generated_sequences:
+                    eos_token_pos = torch.nonzero((sequence == self.llm_tokenizer.eos_token_id), as_tuple=True)[0]
+                    if len(eos_token_pos) == 0:
+                        eos_token_pos = len(sequence) -1
+                    eos_list.append(eos_token_pos)
+                eos_pos = torch.tensor(eos_list, device = eos_pos.device)
+                assert len(eos_pos) == bs
+            
+            eos_pos = eos_pos -1 ## SOS remove ## TODO chat-gpt 는 아니라네..
+            eos_hidden = [outputs.hidden_states[pos][-1][i] for i, pos in enumerate(eos_pos)]
+            eos_hidden = torch.stack(eos_hidden).squeeze(1)
+            # -----
+
+            # Extract the hidden states of the EOS tokens
+            # batch_indices = torch.arange(bs).to(eos_pos.device)
+            # num_query = inputs_llm.size(1) ## 32
+            # eos_hidden = hidden_states[batch_indices, num_query+eos_pos, :]
+            # eos_hidden = hidden_states[-1]
+
+            ingr_prediction = self.ingr_classifier(eos_hidden)
+
+            ## 여기!
+            # hidden_states = self.llm_model(
+            #     inputs_embeds=inputs_embeds,
+            #     attention_mask=attention_mask,
+            #     only_hidden=True
+            # ) ## (batch, 50, 4096)
+
+            ## 이 아래 이걸로 해야하지 않을까 싶은데..
+            # hidden_states = self.llm_model( ## return_hidden
+            #         inputs_embeds=inputs_embeds,
+            #         attention_mask=attention_mask,
+            #         return_dict=True,
+            #         labels=None, ## None
+            #         only_hidden = True,
+            #         output_hidden_states=True,
+            #     )
+
+            # expanded_attention_mask = attention_mask.unsqueeze(-1).expand(hidden_states.size())
+            # masked_hidden_states = hidden_states * expanded_attention_mask
+            # sum_hidden_states = torch.sum(masked_hidden_states, dim=1)
+            # sum_attention_mask = attention_mask.sum(dim=1, keepdim=True) + 1e-9
+            # mean_hidden_states = sum_hidden_states / sum_attention_mask
+        
+            # ingr_prediction = self.ingr_classifier(mean_hidden_states)
+
+            # with self.maybe_autocast():
+            #     transformer_outputs = self.llm_model(
+            #         inputs_embeds=inputs_embeds,
+            #         attention_mask=attention_mask,
+            #         return_dict=True,
+            #         output_hidden_states = True,
+            #     )
+            #     # hidden_states = transformer_outputs[0] ## hidden state
+            #     hidden_states = transformer_outputs.hidden_states[-1] ## TODO - 이거 last hidden state 맞는지
+            #     logits = self.ingr_classifier(hidden_states)
+
+            # batch_size = inputs_embeds.shape[0]
+
+            # if self.llm_tokenizer.pad_token_id is None and batch_size != 1:
+            #     raise ValueError("Cannot handle batch sizes > 1 if no padding token is defined.")
+            # if self.llm_tokenizer.pad_token_id is None:
+            #     sequence_lengths = -1
+            # else:
+            #     if llm_tokens['input_ids'] is not None:
+            #         sequence_lengths = (torch.ne(llm_tokens['input_ids'], self.llm_tokenizer.pad_token_id).sum(-1) - 1).to(logits.device)
+            #     else:
+            #         sequence_lengths = -1
+
+            # pooled_logits = logits[torch.arange(batch_size, device=logits.device), sequence_lengths]
+
+            loss_fct = nn.BCEWithLogitsLoss()
+
+            ingr_gt = samples['ingredient_int']
+            ingr_gt_tensor = torch.zeros((bs, self.num_ingr)) ## (batch_size, 1488)
+
+            for i, labels in enumerate(ingr_gt):
+                ingr_gt_tensor[i, labels] = 1
+                ingr_gt_tensor[i, [0,self.num_ingr-1]] = 0 ## pad
+    
+            ingr_gt_tensor = ingr_gt_tensor.to(ingr_prediction.device) ## 원래는 [:, 1:-1]
+            
+            loss = loss_fct(ingr_prediction, ingr_gt_tensor)
+            
+            ###
+
+            ingr_prediction = torch.sigmoid(ingr_prediction)
+            ingr_prediction = (ingr_prediction > 0.5).float()
+            ingr_pred_int = [torch.nonzero(row, as_tuple=False).squeeze(-1).tolist() for row in ingr_prediction]
+            # ingr_pred_int = [[item + 1 for item in sublist] for sublist in ingr_pred_int]
+
+
+            quantity_prediction = []
+            if self.quantity_layer:
+                quantity_prediction = self.quantity_classifier(hidden_states)
+                quantity_prediction = [quantity_prediction[i][ingr_pred] for i, ingr_pred in enumerate(ingr_pred_int)]
+                # assert quantity_prediction.shape == ingr_pred_int.shape
+            
+            return_metric = {'f1':None, 'iou': None, 'prediction':None, 'ingr_prediction': ingr_prediction, 'ingr_pred_int': ingr_pred_int, 'quantity_prediction':quantity_prediction, 'loss': loss}
+
+            if eval:
+                # ingr_gt = samples['ingredient_int']
+                # ingr_gt_tensor = torch.zeros((hidden_states.shape[0], self.num_ingr)) ## (batch_size, 1488)
+
+                # for i, labels in enumerate(ingr_gt):
+                #     ingr_gt_tensor[i, labels] = 1
+        
+                # ingr_gt_tensor = ingr_gt_tensor.to(ingr_prediction.device) ## 0, 1487 제거
+                f1, iou = compute_metrics(ingr_prediction, ingr_gt_tensor)
+
+                return_metric['f1'] = f1
+                return_metric['iou'] = iou
+
+                ingr_text = []
+                pred = ingr_prediction
+                for i in range(pred.size(0)):
+                    one_hot = pred[i]
+                    indices = (one_hot ==1).nonzero().squeeze()
+
+                    ingr_names = []
+
+                    if indices.dim() == 0: ## TODO
+                        ingr_name = self.idx2ingr.get(str(indices.item())) ## 
+                        ingr_names.append(ingr_name)
+                    
+                    else:
+                        for idx in indices:
+                            if idx == 0 or idx == self.num_ingr -1:
+                                continue
+                            ingr_name = self.idx2ingr.get(str(idx.item()))
+                            if ingr_name is not None:
+                                ingr_names.append(ingr_name)
+
+                    ingr_text.append(ingr_names)
+                return_metric['prediction'] = ingr_text
+
+            return return_metric
 
         else:
             with self.maybe_autocast():

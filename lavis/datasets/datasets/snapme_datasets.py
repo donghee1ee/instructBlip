@@ -36,7 +36,7 @@ class SNAPMeDataset(BaseDataset): ## for VQA
         ingrs_vocab_v = pickle.load(open('/nfs_share2/code/donghee/inversecooking/data/recipe1m_vocab_ingrs.pkl', 'rb'))
         self.ingr2idx = ingrs_vocab_v.word2idx
 
-        self.snapme_mapping = json.load(open("/nfs_share2/code/donghee/LAVIS/snapme_mapping.json", 'r'))
+        # self.snapme_mapping = json.load(open("/nfs_share2/code/donghee/LAVIS/snapme_mapping.json", 'r'))
         wrong_nums = json.load(open("/nfs_share2/code/donghee/LAVIS/ingr_wrong.json", 'r'))
         self.wrong_nums = wrong_nums.keys()
 
@@ -48,7 +48,9 @@ class SNAPMeDataset(BaseDataset): ## for VQA
 
         sample = self.dataset[index]
         gt = sample['gt']
+        gt = list(set(gt))
         gt_int = sample['gt_int']
+        gt_int = list(set(gt_int))
 
         ## TODO gt -> gt int
         ## assert len(gt) == len(gt_int)

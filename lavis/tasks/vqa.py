@@ -9,6 +9,7 @@ import logging
 import json
 import os
 import torch
+import numpy as np
 
 import lavis.common.dist_utils as dist_utils
 import torch.distributed as dist
@@ -17,7 +18,7 @@ from lavis.common.vqa_tools.vqa import VQA
 from lavis.common.vqa_tools.vqa_eval import VQAEval
 from lavis.tasks.base_task import BaseTask
 from lavis.datasets.data_utils import prepare_sample
-from lavis.common.dist_utils import is_dist_avail_and_initialized
+from lavis.common.dist_utils import is_dist_avail_and_initialized, get_rank, get_world_size, is_main_process
 from lavis.common.logger import MetricLogger, SmoothedValue
 
 
@@ -129,11 +130,15 @@ class VQATask(BaseTask):
         iou = []
         loss = []
 
+        global_TPs = 0
+        global_FPs = 0
+        global_FNs = 0
+
         # snapme_paths = ['/nfs_share2/code/donghee/inversecooking/snapme/snapme_mydb/00aed7f846529795993f19942c0d.jpeg', '/nfs_share2/code/donghee/inversecooking/snapme/snapme_mydb/0b90e149404986da7d5930438421.jpeg', '/nfs_share2/code/donghee/inversecooking/snapme/snapme_mydb/0b4297584ab4a5813c4664fde485.jpeg', '/nfs_share2/code/donghee/inversecooking/snapme/snapme_mydb/0d96e4264601b476277c7ee51232.jpeg', '/nfs_share2/code/donghee/inversecooking/snapme/snapme_mydb/0d0258474903a20af0b59f165e3d.jpeg']
 
         # snapmes = [p.split('/')[-1] for p in snapme_paths]
         # snapme_ids = set(snapmes)
-
+        model.eval()
         for samples in metric_logger.log_every(data_loader, print_freq, header):
             samples = prepare_sample(samples, cuda_enabled=cuda_enabled) ## (batch_size, --)
 
@@ -147,10 +152,20 @@ class VQATask(BaseTask):
 
             with torch.no_grad():
                 with model.maybe_autocast():
-                    loss_dict = model.forward(samples) ## eval = True -> loss_dict['prediction']
-                f1.append(loss_dict['f1'])
-                iou.append(loss_dict['iou'])
+                    # loss_dict = model.eval_metrics(samples) ## eval = True -> loss_dict['prediction']
+                    loss_dict = model.generate(samples, eval=True, num_beams=1) ## greedy decoding # eval
+                    
+                f1.append(loss_dict['f1'].item())
+                iou.append(loss_dict['iou'].item())
                 loss.append(loss_dict['loss'].item())
+
+                # f1.extend(loss_dict['f1'])
+                # iou.extend(loss_dict['iou'])
+                # loss.append(loss_dict['loss'].item())
+
+                # global_TPs += loss_dict['TPs']
+                # global_FPs += loss_dict['FPs']
+                # global_FNs += loss_dict['FNs']
             
             sen = []
             for k, v in loss_dict.items():
@@ -158,31 +173,132 @@ class VQATask(BaseTask):
             sen = ", ".join(sen)
             # logging.info(sen)
 
-            if is_dist_avail_and_initialized():
-                dist.barrier()
-            
-        avg_f1 = sum(f1) / len(f1)
-        avg_iou = sum(iou) / len(iou)
-        avg_loss = sum(loss) / len(loss)
+            # if is_dist_avail_and_initialized():
+            #     dist.barrier()
 
-        logging.info(f'** average F1: {avg_f1}, average iou: {avg_iou}, average loss: {avg_loss}')
+            avg_f1 = np.mean(np.array(f1))
+            avg_iou = np.mean(np.array(iou))
+            avg_loss = np.mean(np.array(loss))
+            
+            
+        # avg_f1 = sum(f1) / len(f1)
+        # avg_iou = sum(iou) / len(iou)
+        # avg_loss = sum(loss) / len(loss)
+
+        # avg_f1 = np.mean(np.array(f1))
+        # avg_iou = np.mean(np.array(iou))
+        # avg_loss = np.mean(np.array(loss))
+
+        # with open('/nfs_share2/code/donghee/LAVIS/f1_batch1.json', 'w') as f: ##
+        #     json.dump(f1, f)
+
+        # Calculate global metrics
+        # precision = global_TPs / (global_TPs + global_FPs + 1e-10)
+        # recall = global_TPs / (global_TPs + global_FNs + 1e-10)
+
+        # avg_f1 = 2 * precision * recall / (precision + recall + 1e-10)
+        # avg_iou = global_TPs / (global_TPs + global_FPs + global_FNs + 1e-10)
+
+        # logging.info(f'** average F1: {avg_f1}, average iou: {avg_iou}, average loss: {avg_loss}')
+        logging.info(f'** average F1: {avg_f1}, average iou: {avg_iou}')
         
-        return None
+        return {'f1': avg_f1, 'iou': avg_iou, "agg_metrics": avg_f1}
 
         ## model.forward, loss 계산, f1, iou 계산..
 
     def after_evaluation(self, val_result, split_name, **kwargs):
-        result_file = self.save_result(
+        final_result_file = self.save_result(
             val_result,
             result_dir=registry.get_path("result_dir"),
             filename=f"{split_name}_vqa_result",
-            remove_duplicate="question_id",
+            ## 원래 remove_duplicate="question_id", 였음
         )
 
-        metrics = self._report_metrics(result_file=result_file, split=split_name)
+        # metrics = self._report_metrics(result_file=result_file, split=split_name)
 
-        return metrics
+        # return metrics
 
+        if is_dist_avail_and_initialized():
+            dist.barrier()
+
+        with open(final_result_file, 'r') as f:
+            result_metrics = json.load(f)
+
+        result_metrics = result_metrics[-1]
+
+        return result_metrics 
+
+    @staticmethod
+    def save_result(result, result_dir, filename):
+        import json
+
+        result_file = os.path.join(
+            result_dir, "%s_rank%d.json" % (filename, get_rank())
+        )
+        final_result_file = os.path.join(result_dir, "%s.json" % filename)
+
+        # json.dump([result], open(result_file, "a")) ## no [], 'w'
+
+        # Check if the result_file already exists
+        if os.path.exists(result_file):
+            # If it exists, load the current list of dictionaries
+            with open(result_file, 'r') as f:
+                current_data = json.load(f)
+        else:
+            # If it doesn't exist, initialize an empty list
+            current_data = []
+
+        # Append the new result dictionary to the list
+        current_data.append(result)
+
+        # Write the updated list back to result_file
+        with open(result_file, 'w') as f:
+            json.dump(current_data, f, indent=4)
+        
+
+        if is_dist_avail_and_initialized():
+            dist.barrier()
+
+        if is_main_process():
+            logging.warning("rank %d starts merging results." % get_rank())
+            # combine results from all processes
+            result = {'f1': 0.0, 'iou': 0.0, 'agg_metrics': 0.0}
+
+            for rank in range(get_world_size()):
+                result_file = os.path.join(
+                    result_dir, "%s_rank%d.json" % (filename, rank)
+                )
+                res = json.load(open(result_file, "r"))
+                res = res[-1]
+
+                for k, v in res.items():
+                    result[k] += v
+
+            # average
+            for k, v in result.items():
+                result[k] = v/get_world_size()
+
+            ## save final result file
+            if os.path.exists(final_result_file):
+                # If it exists, load the current list of dictionaries
+                with open(final_result_file, 'r') as f:
+                    current_data = json.load(f)
+            else:
+                # If it doesn't exist, initialize an empty list
+                current_data = []
+
+            # Append the new result dictionary to the list
+            current_data.append(result)
+
+            # Write the updated list back to result_file
+            with open(final_result_file, 'w') as f:
+                json.dump(current_data, f, indent=4)
+
+            # json.dump(result, open(final_result_file, "w"))
+            print("result file saved to %s" % final_result_file)
+
+        return final_result_file
+    
     @dist_utils.main_process
     def _report_metrics(self, result_file, split):
         """

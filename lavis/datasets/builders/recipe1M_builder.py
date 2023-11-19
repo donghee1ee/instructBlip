@@ -5,6 +5,7 @@ from lavis.datasets.datasets.recipe1m_datasets import Recipe1MDataset, Recipe1MI
 import os
 import shutil
 import warnings
+import logging
 
 import lavis.common.utils as utils
 
@@ -70,7 +71,7 @@ class Recipe1MBuilder(BaseDatasetBuilder):
             if not os.path.exists(vis_path):
                 warnings.warn("storage path {} does not exist.".format(vis_path))
 
-            max_num_samples = 1500 if split == 'val' else -1 ## 1500
+            max_num_samples = 1500 if split == 'val' else -1 ## 1500 ## num_samples
             max_num_labels = 20 ## 20
 
             # create datasets
@@ -461,6 +462,9 @@ class Recipe1MVQABuilder(BaseDatasetBuilder):
                 warnings.warn("storage path {} does not exist.".format(vis_path))
 
             max_num_samples = 1500 if split == 'val' else -1 ## 1500
+            # if is_train: ## train 50000개로 제한. train 너무 오래 걸려서
+            #     max_num_samples = 50000
+            #     logging.info(f"Small training set ({max_num_samples} training points)")
             max_num_labels = 20 ## 20
 
             # create datasets

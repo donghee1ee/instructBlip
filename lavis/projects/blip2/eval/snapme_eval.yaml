@@ -8,12 +8,12 @@ model:
   arch: blip2_vicuna_instruct
   model_type: vicuna7b
   use_grad_checkpoint: False
-  load_pretrained: False ##
-  load_finetuned: True
-  finetuned: "/nfs_share2/code/donghee/LAVIS/lavis/output/BLIP2/Pretrain_stage2/20230828023/checkpoint_22.pth" ## 
+  load_pretrained: True ##
+  load_finetuned: False
+  finetuned: "/nfs_share2/code/donghee/LAVIS/lavis/output/BLIP2/Pretrain_stage2/20230930023/checkpoint_best.pth" ## 
   max_txt_len: 30
   
-  ingr_layer: True
+  ingr_layer: True ##
   quantity_layer: False
   
   ## ingr only: /nfs_share2/code/donghee/LAVIS/lavis/output/BLIP2/Pretrain_stage2/20230525102/checkpoint_4.pth
@@ -54,8 +54,8 @@ datasets:
 run:
   task: vqa ## captioning
   # optimization-specific
-  batch_size_train: 20 ## 32
-  batch_size_eval: 20 ## 16
+  batch_size_train: 5 ## 32
+  batch_size_eval: 5 ## 16
   num_workers: 4
 
   # inference-specific

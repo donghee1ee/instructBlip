@@ -5,19 +5,23 @@
 
 # Overall Accuracy is: 43.98
 model:
-  arch: blip2_opt
-  model_type: pretrain_opt2.7b
+  arch: blip2_vicuna_instruct
+  model_type: vicuna7b
   use_grad_checkpoint: False
-  load_pretrained: True ##
-  pretrained: "/nfs_share2/code/donghee/LAVIS/lavis/output/BLIP2/Pretrain_stage2/20230525102/checkpoint_4.pth" ## 
+  load_pretrained: False ##
+  load_finetuned: True
+  finetuned: "/nfs_share2/code/donghee/LAVIS/lavis/output/BLIP2/Pretrain_stage2/20231026142/checkpoint_best.pth" ## 
   max_txt_len: 30
-
+  
+  ingr_layer: True
+  quantity_layer: False
+  
   ## ingr only: /nfs_share2/code/donghee/LAVIS/lavis/output/BLIP2/Pretrain_stage2/20230525102/checkpoint_4.pth
   ## finetuned: /nfs_share2/code/donghee/LAVIS/lavis/output/BLIP2/Pretrain_stage2/20230516075/checkpoint_9.pth
   ## from scratch: /nfs_share2/code/donghee/LAVIS/lavis/output/BLIP2/Pretrain_stage2/20230515184/checkpoint_9.pth
 
 datasets:
-  recipe1M: 
+  recipe1M_vqa: 
       vis_processor:
         train:
           name: "blip2_image_train"
@@ -28,10 +32,10 @@ datasets:
 
       text_processor:
         train:
-          name: "blip_caption"
+          name: "blip_question"
           prompt: "This is a food made with " ## TODO
         eval:
-          name: "blip_caption"
+          name: "blip_question"
           prompt: "This is a food made with " ## TODO
 
   # gqa: # name of the dataset builder
@@ -48,27 +52,29 @@ datasets:
   #           storage: "/export/share/datasets/vision/GQA/images/"
 
 run:
-  task: ingredient_prediction ## captioning
+  task: vqa ## captioning
   # optimization-specific
-  batch_size_train: 48 ## 32
-  batch_size_eval: 48 ## 16
+  batch_size_train: 24 ## 32
+  batch_size_eval: 10 ## 16
   num_workers: 4
 
   # inference-specific
   max_len: 30
   min_len: 1
   num_beams: 5
-  inference_method: "generate"
-  # prompt: "Question: {} Short answer:"
+  # inference_method: "generate"
+  prompt: "Question: What are the ingredients I need to make this food? Answer:"
 
   seed: 42
-  output_dir: "output/BLIP2/Caption"
+  output_dir: "output/BLIP2/Eval"
 
   evaluate: True
+  train_splits: ["train"]
+  valid_splits: ["val"] ##
   test_splits: ["test"] ##
 
   # distribution-specific
   device: "cuda"
-  world_size: 1
+  world_size: 4 ##
   dist_url: "env://"
   distributed: True

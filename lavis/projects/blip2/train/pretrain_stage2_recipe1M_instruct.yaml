@@ -22,7 +22,7 @@ model:
   ingr_loss : False ##
   recipe: False ##
   # resume_ckpt_path: "/nfs_share2/code/donghee/LAVIS/lavis/output/BLIP2/Pretrain_stage2/20230828023/checkpoint_9.pth"
-  ingr_layer: False ##
+  ingr_layer: True ##
   quantity_layer: False
 
 
@@ -72,14 +72,14 @@ run:
   task: vqa ## ingredient_prediction
   # optimizer
   lr_sched: "linear_warmup_cosine_lr"
-  init_lr: 1e-4 ##1e-4
+  init_lr: 1e-4 
   min_lr: 1e-5
   warmup_lr: 1e-6
 
   weight_decay: 0.05
-  max_epoch: 120 ##
-  batch_size_train: 12 ## 12
-  batch_size_eval: 12 ## 12
+  max_epoch: 20 ##
+  batch_size_train: 15 ## 12
+  batch_size_eval: 15 ## 12
   num_workers: 4
   warmup_steps: 2000
 
@@ -92,10 +92,10 @@ run:
 
   evaluate: False ##
   train_splits: ["train"]
-  # valid_splits: ["val"] ## evaluation 잘 되면 이거 살리기
-  # test_splits: ["test"]
+  valid_splits: ["val"] ## evaluation 잘 되면 이거 살리기
+  test_splits: ["test"]
 
   device: "cuda"
-  world_size: 1 ##
+  world_size: 4 ##
   dist_url: "env://"
   distributed: True

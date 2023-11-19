@@ -29,7 +29,7 @@ model:
 
   ## custom #######
   ingr_layer: True
-  quantity_layer: True
+  quantity_layer: True ## False로 바꿔보자
 
 
 preprocess:

@@ -335,7 +335,19 @@ def compute_metrics(predictions, ground_truth):
     iou = TP / (TP + FP + FN + 1e-10)
 
     # Compute average metrics for the batch
-    avg_f1_score = f1_score.mean().item()
-    avg_iou = iou.mean().item()
+    avg_f1_score = f1_score.mean()
+    avg_iou = iou.mean()
+
+    # return avg_f1_score, avg_iou
 
     return avg_f1_score, avg_iou
+
+def compute_raw_metrics(predictions, ground_truth):
+    binary_predictions = (predictions > 0.5).float()
+
+    TPs = (binary_predictions * ground_truth).sum(dim=1)
+    FPs = (binary_predictions * (1 - ground_truth)).sum(dim=1)
+    FNs = ((1 - binary_predictions) * ground_truth).sum(dim=1)
+
+    return TPs.sum().item(), FPs.sum().item(), FNs.sum().item()
+

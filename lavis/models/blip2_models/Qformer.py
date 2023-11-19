@@ -440,7 +440,7 @@ class BertLayer(nn.Module):
                     encoder_hidden_states,
                     encoder_attention_mask,
                     output_attentions=output_attentions,
-                )
+                ) ## 여기서부터 달라짐..
                 query_attention_output = cross_attention_outputs[0]
                 outputs = (
                     outputs + cross_attention_outputs[1:-1]

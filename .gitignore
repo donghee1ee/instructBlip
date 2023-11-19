@@ -166,3 +166,7 @@ temp.ipynb
 .vscode/
 snapme/
 instructblip_results/
+beverage/
+*.txt
+*.json
+*.xlsx
